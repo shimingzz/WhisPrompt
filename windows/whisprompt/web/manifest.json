@@ -1,0 +1,13 @@
+{
+  "name": "WhisPrompt",
+  "short_name": "WhisPrompt",
+  "description": "iPhone 麥克風 → Windows 語音轉 prompt",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#101418",
+  "theme_color": "#101418",
+  "icons": [
+    { "src": "icon-180.png", "sizes": "180x180", "type": "image/png" },
+    { "src": "icon-512.png", "sizes": "512x512", "type": "image/png" }
+  ]
+}

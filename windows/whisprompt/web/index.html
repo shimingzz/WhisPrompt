@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+<title>WhisPrompt</title>
+<link rel="manifest" href="manifest.json">
+<link rel="stylesheet" href="style.css">
+<link rel="apple-touch-icon" href="icon-180.png">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="theme-color" content="#101418">
+</head>
+<body>
+<main>
+  <header>
+    <h1>WhisPrompt</h1>
+    <div id="status" class="status">連線中...</div>
+  </header>
+
+  <div class="mode-row" id="modeRow"></div>
+
+  <div class="rec-area">
+    <button id="recBtn" class="rec-btn" disabled>
+      <span class="rec-icon"></span>
+    </button>
+    <div id="timer" class="timer">點擊開始錄音</div>
+  </div>
+
+  <section id="resultArea" class="hidden">
+    <div class="card">
+      <div class="card-head">
+        <span>優化後 Prompt</span>
+        <button class="copy-btn" data-target="promptText">複製</button>
+      </div>
+      <pre id="promptText"></pre>
+    </div>
+    <div class="card dim">
+      <div class="card-head">
+        <span>原始轉錄 <span id="meta" class="meta"></span></span>
+        <button class="copy-btn" data-target="transcriptText">複製</button>
+      </div>
+      <pre id="transcriptText"></pre>
+    </div>
+  </section>
+</main>
+<script src="app.js"></script>
+</body>
+</html>

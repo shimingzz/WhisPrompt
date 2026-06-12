@@ -38,6 +38,7 @@ class Result:
     prompt: str
     mode: str
     elapsed: float
+    title: str = ""
     id: str = ""
     archived: bool = False
 
@@ -88,6 +89,8 @@ class Pipeline:
         think = think if think in THINK_LEVELS else self.settings.think_level
         self._status("優化 prompt 中...")
         prompt = self.llm.optimize(transcript, mode, think)
+        self._status("產生標題中...")
+        title = self.llm.make_title(prompt or transcript)
         result = Result(
             timestamp=datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             filename=filename,
@@ -97,6 +100,7 @@ class Pipeline:
             prompt=prompt,
             mode=mode,
             elapsed=round(time.monotonic() - start, 1),
+            title=title,
         )
         payload = {k: v for k, v in result.to_dict().items() if k not in ("id", "archived")}
         result.id = self.store.add(payload)["id"]
@@ -104,6 +108,59 @@ class Pipeline:
         if self.on_result:
             self.on_result(result)
         return result
+
+    def refine(self, entry_id: str, supplement: str = "",
+               base_prompt: str = "", think: str | None = None) -> Result:
+        """Iteratively improve an existing entry.
+
+        supplement: new voice/text input merged into the entry's prompt.
+        base_prompt: caller-edited prompt to use as the starting point
+        (e.g. the desktop's editable prompt pane). With no supplement the
+        base is simply run through another optimization pass.
+        """
+        entry = self.store.get(entry_id)
+        if entry is None:
+            raise ValueError(f"紀錄不存在: {entry_id}")
+        start = time.monotonic()
+        think = think if think in THINK_LEVELS else self.settings.think_level
+        base = (base_prompt or entry.get("prompt") or entry.get("transcript") or "").strip()
+
+        if supplement.strip():
+            self._status("融合補充內容中...")
+            prompt = self.llm.refine(base, supplement.strip(), think)
+            transcript = (entry.get("transcript", "") + "\n\n[補充] " + supplement.strip()).strip()
+        else:
+            self._status("重新優化 prompt 中...")
+            prompt = self.llm.optimize(base, "prompt", think)
+            transcript = entry.get("transcript", "")
+
+        self._status("產生標題中...")
+        title = self.llm.make_title(prompt)
+        updated = self.store.update(
+            entry_id,
+            prompt=prompt,
+            transcript=transcript,
+            title=title,
+            timestamp=datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            elapsed=round(time.monotonic() - start, 1),
+        )
+        self._status("完成")
+        result = Result(**{k: v for k, v in updated.items() if k in Result.__dataclass_fields__})
+        if self.on_result:
+            self.on_result(result)
+        return result
+
+    def backfill_titles(self) -> None:
+        """Generate titles for entries created before titles existed."""
+        changed = False
+        for entry in self.store.list():
+            if not entry.get("title"):
+                title = self.llm.make_title(entry.get("prompt") or entry.get("transcript") or "")
+                if title:
+                    self.store.update(entry["id"], title=title)
+                    changed = True
+        if changed and self.on_history_changed:
+            self.on_history_changed()
 
 
 def build_app(pipeline: Pipeline) -> FastAPI:
@@ -155,6 +212,45 @@ def build_app(pipeline: Pipeline) -> FastAPI:
         flag = None if archived == "all" else archived == "1"
         items = pipeline.store.list(archived=flag)
         return items[-limit:][::-1]  # newest first
+
+    @app.post("/api/history/{item_id}/refine")
+    def refine_text(item_id: str, body: dict):
+        try:
+            result = pipeline.refine(
+                item_id,
+                supplement=(body.get("text") or ""),
+                base_prompt=(body.get("base_prompt") or ""),
+                think=body.get("think") or None,
+            )
+        except ValueError as e:
+            return JSONResponse({"error": str(e)}, status_code=404)
+        except Exception as e:
+            log.exception("refine failed")
+            return JSONResponse({"error": str(e)}, status_code=500)
+        if pipeline.on_history_changed:
+            pipeline.on_history_changed()
+        return result.to_dict()
+
+    @app.post("/api/history/{item_id}/refine-audio")
+    def refine_audio(item_id: str, file: UploadFile = File(...), think: str = Form("")):
+        ensure_dirs()
+        stamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        suffix = Path(file.filename or "audio.m4a").suffix or ".m4a"
+        dest = RECORDINGS_DIR / f"ref_{stamp}{suffix}"
+        dest.write_bytes(file.file.read())
+        try:
+            tr = pipeline.transcriber.transcribe(
+                dest, pipeline.settings.whisper_language or None)
+            result = pipeline.refine(item_id, supplement=tr["text"],
+                                     think=think or None)
+        except ValueError as e:
+            return JSONResponse({"error": str(e)}, status_code=404)
+        except Exception as e:
+            log.exception("refine-audio failed")
+            return JSONResponse({"error": str(e)}, status_code=500)
+        if pipeline.on_history_changed:
+            pipeline.on_history_changed()
+        return result.to_dict()
 
     @app.delete("/api/history/{item_id}")
     def delete_history(item_id: str):

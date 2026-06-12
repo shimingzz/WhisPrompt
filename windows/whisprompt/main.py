@@ -35,6 +35,8 @@ def main() -> int:
         print(f"PWA:        {manager.app_url}")
         print(f"憑證安裝頁: {manager.helper_url}")
         print("預先載入 Whisper 模型中...")
+        import threading
+        threading.Thread(target=pipeline.backfill_titles, daemon=True).start()
         pipeline.transcriber.load()
         print(f"Whisper 已載入 ({pipeline.transcriber.device})。Ctrl+C 結束。")
         try:

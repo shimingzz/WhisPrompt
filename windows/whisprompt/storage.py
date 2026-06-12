@@ -55,6 +55,15 @@ class HistoryStore:
                 return True
         return False
 
+    def update(self, item_id: str, **fields) -> dict | None:
+        with self._lock:
+            for item in self._items:
+                if item["id"] == item_id:
+                    item.update(fields)
+                    self._save()
+                    return item
+        return None
+
     def set_archived(self, item_id: str, archived: bool) -> dict | None:
         with self._lock:
             for item in self._items:

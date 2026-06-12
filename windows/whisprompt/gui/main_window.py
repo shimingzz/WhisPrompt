@@ -74,10 +74,9 @@ class HistoryItemWidget(QWidget):
         head.addWidget(delete_btn)
         layout.addLayout(head)
 
-        preview = (entry.get("prompt") or "").replace("\n", " ")
-        if len(preview) > 90:
-            preview = preview[:90] + "…"
-        text = QLabel(preview or "(空白)")
+        # Show the model-generated title, not the content itself.
+        title = entry.get("title") or (entry.get("prompt") or "")[:24] or "(空白)"
+        text = QLabel(title)
         text.setWordWrap(True)
         layout.addWidget(text)
 
@@ -180,28 +179,30 @@ class MainWindow(QMainWindow):
         left_layout.addWidget(self.history_list)
         split.addWidget(left)
 
-        right = QWidget()
-        right_layout = QVBoxLayout(right)
+        # Right side: a vertical splitter so each pane is drag-resizable.
+        right = QSplitter(Qt.Vertical)
 
         input_box = QGroupBox("輸入文字(直接打字,不用錄音)")
         in_layout = QVBoxLayout(input_box)
         self.text_input = QPlainTextEdit()
-        self.text_input.setPlaceholderText("在這裡輸入或貼上需求描述,按「優化」改寫成完整 prompt…")
-        self.text_input.setFixedHeight(88)
+        self.text_input.setPlaceholderText(
+            "在這裡輸入或貼上需求描述。「優化」建立新紀錄;「補充」融合進左側選取的紀錄…")
         in_layout.addWidget(self.text_input)
         in_row = QHBoxLayout()
         in_row.addStretch()
-        self.optimize_btn = QPushButton("✨ 優化")
+        self.refine_btn = QPushButton("➕ 補充到選取紀錄")
+        self.refine_btn.clicked.connect(self._refine_with_text)
+        in_row.addWidget(self.refine_btn)
+        self.optimize_btn = QPushButton("✨ 優化(新紀錄)")
         self.optimize_btn.setObjectName("primary")
         self.optimize_btn.clicked.connect(self._optimize_text)
         in_row.addWidget(self.optimize_btn)
         in_layout.addLayout(in_row)
-        right_layout.addWidget(input_box)
+        right.addWidget(input_box)
 
-        prompt_box = QGroupBox("優化後 Prompt")
+        prompt_box = QGroupBox("優化後 Prompt(可直接編輯)")
         pb_layout = QVBoxLayout(prompt_box)
         self.prompt_edit = QPlainTextEdit()
-        self.prompt_edit.setReadOnly(True)
         pb_layout.addWidget(self.prompt_edit)
         btn_row = QHBoxLayout()
         copy_prompt = QPushButton("複製 Prompt")
@@ -211,16 +212,22 @@ class MainWindow(QMainWindow):
         copy_raw.clicked.connect(lambda: self._copy(self.transcript_edit.toPlainText()))
         btn_row.addWidget(copy_raw)
         btn_row.addStretch()
+        self.reoptimize_btn = QPushButton("🔁 繼續優化")
+        self.reoptimize_btn.setObjectName("primary")
+        self.reoptimize_btn.setToolTip("以目前(可含手動編輯)的 prompt 為基礎再優化一輪,更新同一筆紀錄")
+        self.reoptimize_btn.clicked.connect(self._reoptimize)
+        btn_row.addWidget(self.reoptimize_btn)
         pb_layout.addLayout(btn_row)
-        right_layout.addWidget(prompt_box, stretch=3)
+        right.addWidget(prompt_box)
 
         tr_box = QGroupBox("原文(轉錄/輸入)")
         tr_layout = QVBoxLayout(tr_box)
         self.transcript_edit = QPlainTextEdit()
         self.transcript_edit.setReadOnly(True)
         tr_layout.addWidget(self.transcript_edit)
-        right_layout.addWidget(tr_box, stretch=2)
+        right.addWidget(tr_box)
 
+        right.setSizes([150, 330, 180])
         split.addWidget(right)
         split.setSizes([350, 770])
         root.addWidget(split)
@@ -240,27 +247,53 @@ class MainWindow(QMainWindow):
         self.settings.save()
         self._apply_theme()
 
-    # ---- text input ------------------------------------------------------
-    def _optimize_text(self) -> None:
-        text = self.text_input.toPlainText().strip()
-        if not text:
-            return
+    # ---- text input / iterative refine ------------------------------------
+    def _current_entry_id(self) -> str | None:
+        item = self.history_list.currentItem()
+        return item.data(Qt.UserRole)["id"] if item else None
+
+    def _run_in_background(self, job, clear_input: bool = False) -> None:
         self.text_busy.emit(True)
+        self._clear_input_after = clear_input
 
         def work():
             try:
-                self.pipeline.process_text(text)
+                job()
             except Exception as e:  # surfaced via status bar
-                self.status_changed.emit(f"優化失敗: {e}")
+                self.status_changed.emit(f"失敗: {e}")
             finally:
                 self.text_busy.emit(False)
 
         threading.Thread(target=work, daemon=True).start()
 
+    def _optimize_text(self) -> None:
+        text = self.text_input.toPlainText().strip()
+        if not text:
+            return
+        self._run_in_background(lambda: self.pipeline.process_text(text), clear_input=True)
+
+    def _refine_with_text(self) -> None:
+        text = self.text_input.toPlainText().strip()
+        entry_id = self._current_entry_id()
+        if not text or not entry_id:
+            self.status_bar.showMessage("請先在左側選取一筆紀錄,並輸入補充內容", 3000)
+            return
+        self._run_in_background(
+            lambda: self.pipeline.refine(entry_id, supplement=text), clear_input=True)
+
+    def _reoptimize(self) -> None:
+        entry_id = self._current_entry_id()
+        base = self.prompt_edit.toPlainText().strip()
+        if not entry_id or not base:
+            self.status_bar.showMessage("請先選取一筆有內容的紀錄", 3000)
+            return
+        self._run_in_background(lambda: self.pipeline.refine(entry_id, base_prompt=base))
+
     def _set_text_busy(self, busy: bool) -> None:
-        self.optimize_btn.setEnabled(not busy)
-        self.optimize_btn.setText("優化中…" if busy else "✨ 優化")
-        if not busy:
+        for btn in (self.optimize_btn, self.refine_btn, self.reoptimize_btn):
+            btn.setEnabled(not busy)
+        self.optimize_btn.setText("處理中…" if busy else "✨ 優化(新紀錄)")
+        if not busy and getattr(self, "_clear_input_after", False):
             self.text_input.clear()
 
     # ---- history panel ---------------------------------------------------
@@ -382,6 +415,7 @@ def run_gui(pipeline: Pipeline) -> int:
     manager = ServerManager(pipeline)
     manager.start()
     win = MainWindow(pipeline, manager)
+    threading.Thread(target=pipeline.backfill_titles, daemon=True).start()
     win.show()
     code = app.exec()
     manager.stop()

@@ -131,19 +131,38 @@ function finishRecording() {
   mediaRecorder.stop();  // onstop fires upload()
 }
 
+// ---- iterative refine targeting ----
+let refineTarget = null;  // {id, title} — next voice/text input merges into this entry
+
+function setRefineTarget(item) {
+  refineTarget = item;
+  $("refineBanner").classList.toggle("hidden", !item);
+  if (item) {
+    $("refineLabel").textContent = `補充至:${item.title || item.timestamp}`;
+    window.scrollTo({ top: 0, behavior: "smooth" });
+  }
+}
+$("refineCancel").onclick = () => setRefineTarget(null);
+
 async function upload(blob) {
   const ext = blob.type.includes("mp4") ? "m4a" : "webm";
   const form = new FormData();
   form.append("file", blob, `recording.${ext}`);
-  form.append("mode", mode);
   form.append("think", think);
+  let url = "/api/audio";
+  if (refineTarget) {
+    url = `/api/history/${refineTarget.id}/refine-audio`;
+  } else {
+    form.append("mode", mode);
+  }
   try {
-    const r = await fetch("/api/audio", { method: "POST", body: form });
+    const r = await fetch(url, { method: "POST", body: form });
     const data = await r.json();
     if (!r.ok) throw new Error(data.error || r.statusText);
     showResult(data);
     loadHistory();
     timerEl.textContent = `完成 (${data.elapsed}s) · 點擊再次錄音`;
+    setRefineTarget(null);
   } catch (e) {
     timerEl.textContent = `失敗: ${e.message}`;
   } finally {
@@ -168,7 +187,8 @@ $("textSubmit").onclick = async () => {
   btn.disabled = true;
   btn.textContent = "優化中…";
   try {
-    const r = await fetch("/api/text", {
+    const url = refineTarget ? `/api/history/${refineTarget.id}/refine` : "/api/text";
+    const r = await fetch(url, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ text, mode, think }),
@@ -178,6 +198,7 @@ $("textSubmit").onclick = async () => {
     showResult(data);
     loadHistory();
     $("textInput").value = "";
+    setRefineTarget(null);
   } catch (e) {
     timerEl.textContent = `失敗: ${e.message}`;
   } finally {
@@ -233,6 +254,7 @@ function renderHistory(items) {
         btn.textContent = "已複製";
         setTimeout(() => { btn.textContent = "複製"; }, 1200);
       }),
+      historyBtn("補充", () => setRefineTarget(item)),
       historyBtn(item.archived ? "還原" : "封存", async () => {
         await fetch(`/api/history/${item.id}/archive`, {
           method: "POST",
@@ -250,11 +272,20 @@ function renderHistory(items) {
     head.appendChild(actions);
     el.appendChild(head);
 
+    // Title only in the list; tap to expand the full prompt.
+    const title = document.createElement("div");
+    title.className = "history-item-title";
+    title.textContent = item.title || (item.prompt || "").slice(0, 24) || "(空白)";
+    el.appendChild(title);
+
     const body = document.createElement("div");
-    body.className = "history-item-text";
+    body.className = "history-item-text collapsed";
     body.textContent = item.prompt;
-    body.onclick = () => body.classList.toggle("expanded");
     el.appendChild(body);
+
+    const toggle = () => body.classList.toggle("collapsed");
+    title.onclick = toggle;
+    body.onclick = toggle;
 
     list.appendChild(el);
   }
@@ -287,6 +318,13 @@ document.querySelectorAll(".copy-btn").forEach((btn) => {
     }
   };
 });
+
+// Cross-device sync: refresh when the page regains focus + light polling,
+// so edits made on the desktop show up here without a manual reload.
+document.addEventListener("visibilitychange", () => {
+  if (!document.hidden) loadHistory();
+});
+setInterval(() => { if (!document.hidden) loadHistory(); }, 10000);
 
 if ("serviceWorker" in navigator) navigator.serviceWorker.register("sw.js");
 init();

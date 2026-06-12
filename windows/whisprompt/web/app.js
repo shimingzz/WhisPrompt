@@ -96,6 +96,7 @@ async function upload(blob) {
     const data = await r.json();
     if (!r.ok) throw new Error(data.error || r.statusText);
     showResult(data);
+    loadHistory();
     timerEl.textContent = `完成 (${data.elapsed}s) · 點擊再次錄音`;
   } catch (e) {
     timerEl.textContent = `失敗: ${e.message}`;
@@ -111,6 +112,85 @@ function showResult(data) {
   $("transcriptText").textContent = data.transcript || "(無語音內容)";
   $("meta").textContent = `· ${data.duration}s · ${data.language}`;
 }
+
+// ---- history (notebook) ----
+let showArchived = false;
+
+async function loadHistory() {
+  try {
+    const r = await fetch(`/api/history?archived=${showArchived ? 1 : 0}&limit=50`);
+    renderHistory(await r.json());
+  } catch { /* server unreachable; init() handles retry */ }
+}
+
+function renderHistory(items) {
+  const list = $("historyList");
+  list.innerHTML = "";
+  if (!items.length) {
+    const empty = document.createElement("div");
+    empty.className = "history-empty";
+    empty.textContent = showArchived ? "封存區是空的" : "還沒有紀錄";
+    list.appendChild(empty);
+    return;
+  }
+  for (const item of items) {
+    const el = document.createElement("div");
+    el.className = "history-item";
+
+    const head = document.createElement("div");
+    head.className = "history-item-head";
+    const time = document.createElement("span");
+    time.textContent = item.timestamp;
+    head.appendChild(time);
+
+    const actions = document.createElement("span");
+    actions.className = "history-actions";
+    actions.append(
+      historyBtn("複製", async (btn) => {
+        await navigator.clipboard.writeText(item.prompt);
+        btn.textContent = "已複製";
+        setTimeout(() => { btn.textContent = "複製"; }, 1200);
+      }),
+      historyBtn(item.archived ? "還原" : "封存", async () => {
+        await fetch(`/api/history/${item.id}/archive`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ archived: !item.archived }),
+        });
+        loadHistory();
+      }),
+      historyBtn("刪除", async () => {
+        if (!confirm("確定刪除這筆紀錄?")) return;
+        await fetch(`/api/history/${item.id}`, { method: "DELETE" });
+        loadHistory();
+      }, "danger"),
+    );
+    head.appendChild(actions);
+    el.appendChild(head);
+
+    const body = document.createElement("div");
+    body.className = "history-item-text";
+    body.textContent = item.prompt;
+    body.onclick = () => body.classList.toggle("expanded");
+    el.appendChild(body);
+
+    list.appendChild(el);
+  }
+}
+
+function historyBtn(label, handler, extra = "") {
+  const b = document.createElement("button");
+  b.className = "history-btn " + extra;
+  b.textContent = label;
+  b.onclick = (e) => { e.stopPropagation(); handler(b); };
+  return b;
+}
+
+$("archiveToggle").onclick = () => {
+  showArchived = !showArchived;
+  $("archiveToggle").classList.toggle("active", showArchived);
+  loadHistory();
+};
 
 recBtn.onclick = () => {
   if (mediaRecorder && mediaRecorder.state === "recording") stopRecording();
@@ -133,3 +213,4 @@ document.querySelectorAll(".copy-btn").forEach((btn) => {
 
 if ("serviceWorker" in navigator) navigator.serviceWorker.register("sw.js");
 init();
+loadHistory();

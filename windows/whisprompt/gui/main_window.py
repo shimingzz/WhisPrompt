@@ -1,4 +1,4 @@
-"""PySide6 desktop UI: connection info, live results, prompt clipboard."""
+"""PySide6 desktop UI: notebook-style prompt history, live results, clipboard."""
 import io
 import threading
 
@@ -7,8 +7,9 @@ from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QGuiApplication, QPixmap
 from PySide6.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QDialog, QGroupBox, QHBoxLayout,
-    QLabel, QListWidget, QListWidgetItem, QMainWindow, QPlainTextEdit,
-    QPushButton, QSplitter, QStatusBar, QVBoxLayout, QWidget,
+    QLabel, QListWidget, QListWidgetItem, QMainWindow, QMessageBox,
+    QPlainTextEdit, QPushButton, QSplitter, QStatusBar, QTabBar,
+    QVBoxLayout, QWidget,
 )
 
 from ..config import MODES
@@ -44,26 +45,67 @@ class QRDialog(QDialog):
         layout.addWidget(link)
 
 
+class HistoryItemWidget(QWidget):
+    """One chat-bubble-style entry: time + preview + archive/delete buttons."""
+
+    def __init__(self, entry: dict, on_archive, on_delete):
+        super().__init__()
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(8, 6, 8, 6)
+        layout.setSpacing(2)
+
+        head = QHBoxLayout()
+        time_label = QLabel(entry["timestamp"])
+        time_label.setStyleSheet("color: gray; font-size: 11px;")
+        head.addWidget(time_label)
+        head.addStretch()
+
+        archive_btn = QPushButton("還原" if entry.get("archived") else "封存")
+        archive_btn.setFixedHeight(22)
+        archive_btn.setStyleSheet("font-size: 11px; padding: 1px 8px;")
+        archive_btn.clicked.connect(lambda: on_archive(entry))
+        head.addWidget(archive_btn)
+
+        delete_btn = QPushButton("刪除")
+        delete_btn.setFixedHeight(22)
+        delete_btn.setStyleSheet("font-size: 11px; padding: 1px 8px; color: #c0392b;")
+        delete_btn.clicked.connect(lambda: on_delete(entry))
+        head.addWidget(delete_btn)
+        layout.addLayout(head)
+
+        preview = (entry.get("prompt") or "").replace("\n", " ")
+        if len(preview) > 90:
+            preview = preview[:90] + "…"
+        text = QLabel(preview or "(空白)")
+        text.setWordWrap(True)
+        layout.addWidget(text)
+
+
 class MainWindow(QMainWindow):
     result_ready = Signal(object)
     status_changed = Signal(str)
     models_loaded = Signal(list, str)
+    history_changed = Signal()
 
     def __init__(self, pipeline: Pipeline, manager: ServerManager):
         super().__init__()
         self.pipeline = pipeline
         self.manager = manager
         self.settings = pipeline.settings
+        self.view_archived = False
         self.setWindowTitle("WhisPrompt")
-        self.resize(980, 640)
+        self.resize(1080, 680)
 
         pipeline.on_result = self.result_ready.emit
         pipeline.on_status = self.status_changed.emit
+        pipeline.on_history_changed = self.history_changed.emit
         self.result_ready.connect(self._on_result)
         self.status_changed.connect(self._on_status)
         self.models_loaded.connect(self._apply_models)
+        self.history_changed.connect(lambda: self._refresh_history(keep_selection=True))
 
         self._build_ui()
+        self._refresh_history()
         self._load_ollama_models()
         threading.Thread(target=self._preload_whisper, daemon=True).start()
 
@@ -99,9 +141,20 @@ class MainWindow(QMainWindow):
         root.addLayout(top)
 
         split = QSplitter()
+
+        left = QWidget()
+        left_layout = QVBoxLayout(left)
+        left_layout.setContentsMargins(0, 0, 0, 0)
+        self.tabs = QTabBar()
+        self.tabs.addTab("紀錄")
+        self.tabs.addTab("封存區")
+        self.tabs.currentChanged.connect(self._tab_changed)
+        left_layout.addWidget(self.tabs)
         self.history_list = QListWidget()
+        self.history_list.setWordWrap(True)
         self.history_list.currentRowChanged.connect(self._show_history_item)
-        split.addWidget(self.history_list)
+        left_layout.addWidget(self.history_list)
+        split.addWidget(left)
 
         right = QWidget()
         right_layout = QVBoxLayout(right)
@@ -130,13 +183,64 @@ class MainWindow(QMainWindow):
         right_layout.addWidget(tr_box, stretch=2)
 
         split.addWidget(right)
-        split.setSizes([260, 720])
+        split.setSizes([340, 740])
         root.addWidget(split)
 
         self.setCentralWidget(central)
         self.status_bar = QStatusBar()
         self.setStatusBar(self.status_bar)
         self.status_bar.showMessage("啟動中...")
+
+    # ---- history panel ---------------------------------------------------
+    def _tab_changed(self, index: int) -> None:
+        self.view_archived = index == 1
+        self._refresh_history()
+
+    def _refresh_history(self, select_id: str | None = None,
+                         keep_selection: bool = False) -> None:
+        if keep_selection and select_id is None:
+            current = self.history_list.currentItem()
+            if current:
+                select_id = current.data(Qt.UserRole)["id"]
+
+        self.history_list.blockSignals(True)
+        self.history_list.clear()
+        entries = self.pipeline.store.list(archived=self.view_archived)
+        select_row = 0
+        for row, entry in enumerate(reversed(entries)):  # newest first
+            item = QListWidgetItem()
+            item.setData(Qt.UserRole, entry)
+            widget = HistoryItemWidget(entry, self._archive_entry, self._delete_entry)
+            item.setSizeHint(widget.sizeHint())
+            self.history_list.addItem(item)
+            self.history_list.setItemWidget(item, widget)
+            if select_id and entry["id"] == select_id:
+                select_row = row
+        self.history_list.blockSignals(False)
+
+        if self.history_list.count():
+            self.history_list.setCurrentRow(select_row)
+        else:
+            self.prompt_edit.clear()
+            self.transcript_edit.clear()
+
+    def _archive_entry(self, entry: dict) -> None:
+        self.pipeline.store.set_archived(entry["id"], not entry.get("archived", False))
+        self._refresh_history()
+
+    def _delete_entry(self, entry: dict) -> None:
+        preview = (entry.get("prompt") or "")[:40]
+        if QMessageBox.question(self, "刪除紀錄", f"確定刪除這筆紀錄?\n\n{preview}…") \
+                == QMessageBox.StandardButton.Yes:
+            self.pipeline.store.delete(entry["id"])
+            self._refresh_history()
+
+    def _show_history_item(self, row: int) -> None:
+        if row < 0:
+            return
+        entry: dict = self.history_list.item(row).data(Qt.UserRole)
+        self.prompt_edit.setPlainText(entry.get("prompt", ""))
+        self.transcript_edit.setPlainText(entry.get("transcript", ""))
 
     # ---- slots -----------------------------------------------------------
     def _show_qr(self) -> None:
@@ -163,28 +267,11 @@ class MainWindow(QMainWindow):
         self.status_bar.showMessage(msg)
 
     def _on_result(self, result: Result) -> None:
-        item = QListWidgetItem(f"{result.timestamp}  ({result.duration}s)")
-        item.setData(Qt.UserRole, result)
-        self.history_list.addItem(item)
-        self.history_list.setCurrentItem(item)
+        if self.view_archived:
+            self.tabs.setCurrentIndex(0)  # jump back to active view
+        self._refresh_history(select_id=result.id)
         if self.settings.auto_copy and result.prompt:
             self._copy(result.prompt)
-
-    def _show_history_item(self, row: int) -> None:
-        if row < 0:
-            return
-        result: Result = self.history_list.item(row).data(Qt.UserRole)
-        self.prompt_edit.setPlainText(result.prompt)
-        self.transcript_edit.setPlainText(result.transcript)
-
-    # ---- background ------------------------------------------------------
-    def _load_ollama_models(self) -> None:
-        def work():
-            models = self.pipeline.llm.list_models()
-            default = self.settings.ollama_model or self.pipeline.llm.pick_default_model()
-            self.models_loaded.emit(models, default)
-
-        threading.Thread(target=work, daemon=True).start()
 
     def _apply_models(self, models: list, default: str) -> None:
         self.model_combo.blockSignals(True)
@@ -196,6 +283,15 @@ class MainWindow(QMainWindow):
         if default and not self.settings.ollama_model:
             self.settings.ollama_model = default
             self.settings.save()
+
+    # ---- background ------------------------------------------------------
+    def _load_ollama_models(self) -> None:
+        def work():
+            models = self.pipeline.llm.list_models()
+            default = self.settings.ollama_model or self.pipeline.llm.pick_default_model()
+            self.models_loaded.emit(models, default)
+
+        threading.Thread(target=work, daemon=True).start()
 
     def _preload_whisper(self) -> None:
         self.status_changed.emit(f"載入 Whisper 模型 {self.settings.whisper_model} 中...")

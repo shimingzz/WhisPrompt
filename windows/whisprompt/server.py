@@ -21,6 +21,7 @@ from . import __version__
 from .certs import CA_CERT, ensure_certs, get_lan_ips
 from .config import MODES, RECORDINGS_DIR, Settings, ensure_dirs
 from .llm import OllamaClient
+from .storage import HistoryStore
 from .transcriber import Transcriber
 
 log = logging.getLogger(__name__)
@@ -37,6 +38,8 @@ class Result:
     prompt: str
     mode: str
     elapsed: float
+    id: str = ""
+    archived: bool = False
 
     def to_dict(self) -> dict:
         return self.__dict__.copy()
@@ -47,10 +50,12 @@ class Pipeline:
     settings: Settings
     transcriber: Transcriber
     llm: OllamaClient
-    history: list[Result] = field(default_factory=list)
+    store: HistoryStore = field(default_factory=HistoryStore)
     # GUI subscribes here; called from worker threads.
     on_result: Callable[[Result], None] | None = None
     on_status: Callable[[str], None] | None = None
+    # GUI refresh hook for history mutations made via the HTTP API (PWA).
+    on_history_changed: Callable[[], None] | None = None
 
     def _status(self, msg: str) -> None:
         log.info(msg)
@@ -74,7 +79,8 @@ class Pipeline:
             mode=mode,
             elapsed=round(time.monotonic() - start, 1),
         )
-        self.history.append(result)
+        payload = {k: v for k, v in result.to_dict().items() if k not in ("id", "archived")}
+        result.id = self.store.add(payload)["id"]
         self._status("完成")
         if self.on_result:
             self.on_result(result)
@@ -110,8 +116,27 @@ def build_app(pipeline: Pipeline) -> FastAPI:
         }
 
     @app.get("/api/history")
-    def history(limit: int = 20):
-        return [r.to_dict() for r in pipeline.history[-limit:]]
+    def history(limit: int = 50, archived: str = "0"):
+        flag = None if archived == "all" else archived == "1"
+        items = pipeline.store.list(archived=flag)
+        return items[-limit:][::-1]  # newest first
+
+    @app.delete("/api/history/{item_id}")
+    def delete_history(item_id: str):
+        if not pipeline.store.delete(item_id):
+            return JSONResponse({"error": "not found"}, status_code=404)
+        if pipeline.on_history_changed:
+            pipeline.on_history_changed()
+        return {"ok": True}
+
+    @app.post("/api/history/{item_id}/archive")
+    def archive_history(item_id: str, body: dict):
+        item = pipeline.store.set_archived(item_id, bool(body.get("archived", True)))
+        if item is None:
+            return JSONResponse({"error": "not found"}, status_code=404)
+        if pipeline.on_history_changed:
+            pipeline.on_history_changed()
+        return item
 
     app.mount("/", StaticFiles(directory=WEB_DIR, html=True), name="web")
     return app

@@ -19,7 +19,7 @@ from fastapi.staticfiles import StaticFiles
 
 from . import __version__
 from .certs import CA_CERT, ensure_certs, get_lan_ips
-from .config import MODES, RECORDINGS_DIR, Settings, ensure_dirs
+from .config import MODES, RECORDINGS_DIR, THINK_LEVELS, Settings, ensure_dirs
 from .llm import OllamaClient
 from .storage import HistoryStore
 from .transcriber import Transcriber
@@ -62,19 +62,38 @@ class Pipeline:
         if self.on_status:
             self.on_status(msg)
 
-    def process(self, audio_path: Path, mode: str | None = None) -> Result:
+    def process(self, audio_path: Path, mode: str | None = None,
+                think: str | None = None) -> Result:
         start = time.monotonic()
-        mode = mode if mode in MODES else self.settings.mode
         self._status(f"轉錄中: {audio_path.name}")
         tr = self.transcriber.transcribe(audio_path, self.settings.whisper_language or None)
-        self._status("優化 prompt 中...")
-        prompt = self.llm.optimize(tr["text"], mode)
-        result = Result(
-            timestamp=datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        return self._finish(
+            start, tr["text"], mode, think,
             filename=audio_path.name,
             duration=round(tr["duration"], 1),
             language=tr["language"],
-            transcript=tr["text"],
+        )
+
+    def process_text(self, text: str, mode: str | None = None,
+                     think: str | None = None) -> Result:
+        """Direct text input (no audio): optimize and record like a recording."""
+        start = time.monotonic()
+        return self._finish(start, text.strip(), mode, think,
+                            filename="文字輸入", duration=0.0, language="text")
+
+    def _finish(self, start: float, transcript: str, mode: str | None,
+                think: str | None, *, filename: str, duration: float,
+                language: str) -> Result:
+        mode = mode if mode in MODES else self.settings.mode
+        think = think if think in THINK_LEVELS else self.settings.think_level
+        self._status("優化 prompt 中...")
+        prompt = self.llm.optimize(transcript, mode, think)
+        result = Result(
+            timestamp=datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            filename=filename,
+            duration=duration,
+            language=language,
+            transcript=transcript,
             prompt=prompt,
             mode=mode,
             elapsed=round(time.monotonic() - start, 1),
@@ -91,16 +110,30 @@ def build_app(pipeline: Pipeline) -> FastAPI:
     app = FastAPI(title="WhisPrompt", version=__version__)
 
     @app.post("/api/audio")
-    def upload_audio(file: UploadFile = File(...), mode: str = Form("")):
+    def upload_audio(file: UploadFile = File(...), mode: str = Form(""),
+                     think: str = Form("")):
         ensure_dirs()
         stamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
         suffix = Path(file.filename or "audio.m4a").suffix or ".m4a"
         dest = RECORDINGS_DIR / f"rec_{stamp}{suffix}"
         dest.write_bytes(file.file.read())
         try:
-            result = pipeline.process(dest, mode or None)
+            result = pipeline.process(dest, mode or None, think or None)
         except Exception as e:
             log.exception("pipeline failed")
+            return JSONResponse({"error": str(e)}, status_code=500)
+        return result.to_dict()
+
+    @app.post("/api/text")
+    def submit_text(body: dict):
+        text = (body.get("text") or "").strip()
+        if not text:
+            return JSONResponse({"error": "text is empty"}, status_code=400)
+        try:
+            result = pipeline.process_text(
+                text, body.get("mode") or None, body.get("think") or None)
+        except Exception as e:
+            log.exception("text pipeline failed")
             return JSONResponse({"error": str(e)}, status_code=500)
         return result.to_dict()
 
@@ -113,6 +146,8 @@ def build_app(pipeline: Pipeline) -> FastAPI:
             "ollama_model": pipeline.llm.resolve_model(),
             "mode": pipeline.settings.mode,
             "modes": MODES,
+            "think_level": pipeline.settings.think_level,
+            "think_levels": THINK_LEVELS,
         }
 
     @app.get("/api/history")

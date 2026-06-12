@@ -9,23 +9,42 @@
 <link rel="apple-touch-icon" href="icon-180.png">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-<meta name="theme-color" content="#101418">
+<meta name="theme-color" content="#FAF9F5">
 </head>
 <body>
 <main>
   <header>
     <h1>WhisPrompt</h1>
-    <div id="status" class="status">連線中...</div>
+    <div class="header-right">
+      <div id="status" class="status">連線中...</div>
+      <button id="themeToggle" class="icon-btn" aria-label="切換明暗模式">🌙</button>
+    </div>
   </header>
 
-  <div class="mode-row" id="modeRow"></div>
+  <div class="option-group">
+    <div class="option-label">模式</div>
+    <div class="mode-row" id="modeRow"></div>
+  </div>
+  <div class="option-group">
+    <div class="option-label">思考</div>
+    <div class="mode-row" id="thinkRow"></div>
+  </div>
 
   <div class="rec-area">
     <button id="recBtn" class="rec-btn" disabled>
       <span class="rec-icon"></span>
     </button>
+    <div id="recControls" class="rec-controls hidden">
+      <button id="pauseBtn" class="pill-btn">⏸ 暫停</button>
+      <button id="doneBtn" class="pill-btn primary">✓ 完成</button>
+    </div>
     <div id="timer" class="timer">點擊開始錄音</div>
   </div>
+
+  <section class="text-input-area">
+    <textarea id="textInput" rows="3" placeholder="或直接輸入文字,按「優化」改寫成完整 prompt…"></textarea>
+    <button id="textSubmit" class="pill-btn primary full">✨ 優化</button>
+  </section>
 
   <section id="resultArea" class="hidden">
     <div class="card">
@@ -37,7 +56,7 @@
     </div>
     <div class="card dim">
       <div class="card-head">
-        <span>原始轉錄 <span id="meta" class="meta"></span></span>
+        <span>原文 <span id="meta" class="meta"></span></span>
         <button class="copy-btn" data-target="transcriptText">複製</button>
       </div>
       <pre id="transcriptText"></pre>
@@ -47,7 +66,7 @@
   <section id="historyArea">
     <div class="history-head">
       <h2>紀錄</h2>
-      <button id="archiveToggle" class="mode-btn">封存區</button>
+      <button id="archiveToggle" class="pill-btn small">封存區</button>
     </div>
     <div id="historyList"></div>
   </section>

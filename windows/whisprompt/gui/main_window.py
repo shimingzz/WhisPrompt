@@ -12,8 +12,9 @@ from PySide6.QtWidgets import (
     QVBoxLayout, QWidget,
 )
 
-from ..config import MODES
+from ..config import MODES, THINK_LEVELS
 from ..server import Pipeline, Result, ServerManager
+from .theme import build_qss
 
 
 def _qr_pixmap(url: str, size: int = 280) -> QPixmap:
@@ -51,24 +52,24 @@ class HistoryItemWidget(QWidget):
     def __init__(self, entry: dict, on_archive, on_delete):
         super().__init__()
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(8, 6, 8, 6)
-        layout.setSpacing(2)
+        layout.setContentsMargins(10, 8, 10, 8)
+        layout.setSpacing(3)
 
         head = QHBoxLayout()
         time_label = QLabel(entry["timestamp"])
-        time_label.setStyleSheet("color: gray; font-size: 11px;")
+        time_label.setObjectName("meta")
         head.addWidget(time_label)
         head.addStretch()
 
         archive_btn = QPushButton("還原" if entry.get("archived") else "封存")
+        archive_btn.setObjectName("chipBtn")
         archive_btn.setFixedHeight(22)
-        archive_btn.setStyleSheet("font-size: 11px; padding: 1px 8px;")
         archive_btn.clicked.connect(lambda: on_archive(entry))
         head.addWidget(archive_btn)
 
         delete_btn = QPushButton("刪除")
+        delete_btn.setObjectName("chipDanger")
         delete_btn.setFixedHeight(22)
-        delete_btn.setStyleSheet("font-size: 11px; padding: 1px 8px; color: #c0392b;")
         delete_btn.clicked.connect(lambda: on_delete(entry))
         head.addWidget(delete_btn)
         layout.addLayout(head)
@@ -86,6 +87,7 @@ class MainWindow(QMainWindow):
     status_changed = Signal(str)
     models_loaded = Signal(list, str)
     history_changed = Signal()
+    text_busy = Signal(bool)
 
     def __init__(self, pipeline: Pipeline, manager: ServerManager):
         super().__init__()
@@ -94,7 +96,7 @@ class MainWindow(QMainWindow):
         self.settings = pipeline.settings
         self.view_archived = False
         self.setWindowTitle("WhisPrompt")
-        self.resize(1080, 680)
+        self.resize(1120, 700)
 
         pipeline.on_result = self.result_ready.emit
         pipeline.on_status = self.status_changed.emit
@@ -103,8 +105,10 @@ class MainWindow(QMainWindow):
         self.status_changed.connect(self._on_status)
         self.models_loaded.connect(self._apply_models)
         self.history_changed.connect(lambda: self._refresh_history(keep_selection=True))
+        self.text_busy.connect(self._set_text_busy)
 
         self._build_ui()
+        self._apply_theme()
         self._refresh_history()
         self._load_ollama_models()
         threading.Thread(target=self._preload_whisper, daemon=True).start()
@@ -113,14 +117,19 @@ class MainWindow(QMainWindow):
     def _build_ui(self) -> None:
         central = QWidget()
         root = QVBoxLayout(central)
+        root.setContentsMargins(14, 10, 14, 8)
 
         top = QHBoxLayout()
-        self.conn_btn = QPushButton("📱 iPhone 連線 / QR code")
+        title = QLabel("WhisPrompt")
+        title.setObjectName("appTitle")
+        top.addWidget(title)
+        top.addSpacing(12)
+        self.conn_btn = QPushButton("📱 iPhone 連線")
         self.conn_btn.clicked.connect(self._show_qr)
         top.addWidget(self.conn_btn)
         top.addStretch()
 
-        top.addWidget(QLabel("模式:"))
+        top.addWidget(QLabel("模式"))
         self.mode_combo = QComboBox()
         for key, label in MODES.items():
             self.mode_combo.addItem(label, key)
@@ -128,16 +137,31 @@ class MainWindow(QMainWindow):
         self.mode_combo.currentIndexChanged.connect(self._mode_changed)
         top.addWidget(self.mode_combo)
 
-        top.addWidget(QLabel("LLM:"))
+        top.addWidget(QLabel("思考"))
+        self.think_combo = QComboBox()
+        for key, label in THINK_LEVELS.items():
+            self.think_combo.addItem(label, key)
+        if self.settings.think_level in THINK_LEVELS:
+            self.think_combo.setCurrentIndex(list(THINK_LEVELS).index(self.settings.think_level))
+        self.think_combo.currentIndexChanged.connect(self._think_changed)
+        top.addWidget(self.think_combo)
+
+        top.addWidget(QLabel("LLM"))
         self.model_combo = QComboBox()
-        self.model_combo.setMinimumWidth(220)
+        self.model_combo.setMinimumWidth(180)
         self.model_combo.currentTextChanged.connect(self._model_changed)
         top.addWidget(self.model_combo)
 
-        self.auto_copy = QCheckBox("自動複製 prompt")
+        self.auto_copy = QCheckBox("自動複製")
         self.auto_copy.setChecked(self.settings.auto_copy)
         self.auto_copy.toggled.connect(self._auto_copy_changed)
         top.addWidget(self.auto_copy)
+
+        self.theme_btn = QPushButton()
+        self.theme_btn.setFixedWidth(40)
+        self.theme_btn.setToolTip("切換明暗模式")
+        self.theme_btn.clicked.connect(self._toggle_theme)
+        top.addWidget(self.theme_btn)
         root.addLayout(top)
 
         split = QSplitter()
@@ -159,6 +183,21 @@ class MainWindow(QMainWindow):
         right = QWidget()
         right_layout = QVBoxLayout(right)
 
+        input_box = QGroupBox("輸入文字(直接打字,不用錄音)")
+        in_layout = QVBoxLayout(input_box)
+        self.text_input = QPlainTextEdit()
+        self.text_input.setPlaceholderText("在這裡輸入或貼上需求描述,按「優化」改寫成完整 prompt…")
+        self.text_input.setFixedHeight(88)
+        in_layout.addWidget(self.text_input)
+        in_row = QHBoxLayout()
+        in_row.addStretch()
+        self.optimize_btn = QPushButton("✨ 優化")
+        self.optimize_btn.setObjectName("primary")
+        self.optimize_btn.clicked.connect(self._optimize_text)
+        in_row.addWidget(self.optimize_btn)
+        in_layout.addLayout(in_row)
+        right_layout.addWidget(input_box)
+
         prompt_box = QGroupBox("優化後 Prompt")
         pb_layout = QVBoxLayout(prompt_box)
         self.prompt_edit = QPlainTextEdit()
@@ -168,14 +207,14 @@ class MainWindow(QMainWindow):
         copy_prompt = QPushButton("複製 Prompt")
         copy_prompt.clicked.connect(lambda: self._copy(self.prompt_edit.toPlainText()))
         btn_row.addWidget(copy_prompt)
-        copy_raw = QPushButton("複製原始轉錄")
+        copy_raw = QPushButton("複製原文")
         copy_raw.clicked.connect(lambda: self._copy(self.transcript_edit.toPlainText()))
         btn_row.addWidget(copy_raw)
         btn_row.addStretch()
         pb_layout.addLayout(btn_row)
         right_layout.addWidget(prompt_box, stretch=3)
 
-        tr_box = QGroupBox("原始轉錄")
+        tr_box = QGroupBox("原文(轉錄/輸入)")
         tr_layout = QVBoxLayout(tr_box)
         self.transcript_edit = QPlainTextEdit()
         self.transcript_edit.setReadOnly(True)
@@ -183,13 +222,46 @@ class MainWindow(QMainWindow):
         right_layout.addWidget(tr_box, stretch=2)
 
         split.addWidget(right)
-        split.setSizes([340, 740])
+        split.setSizes([350, 770])
         root.addWidget(split)
 
         self.setCentralWidget(central)
         self.status_bar = QStatusBar()
         self.setStatusBar(self.status_bar)
         self.status_bar.showMessage("啟動中...")
+
+    # ---- theme -----------------------------------------------------------
+    def _apply_theme(self) -> None:
+        QApplication.instance().setStyleSheet(build_qss(self.settings.theme))
+        self.theme_btn.setText("🌙" if self.settings.theme == "light" else "☀️")
+
+    def _toggle_theme(self) -> None:
+        self.settings.theme = "dark" if self.settings.theme == "light" else "light"
+        self.settings.save()
+        self._apply_theme()
+
+    # ---- text input ------------------------------------------------------
+    def _optimize_text(self) -> None:
+        text = self.text_input.toPlainText().strip()
+        if not text:
+            return
+        self.text_busy.emit(True)
+
+        def work():
+            try:
+                self.pipeline.process_text(text)
+            except Exception as e:  # surfaced via status bar
+                self.status_changed.emit(f"優化失敗: {e}")
+            finally:
+                self.text_busy.emit(False)
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _set_text_busy(self, busy: bool) -> None:
+        self.optimize_btn.setEnabled(not busy)
+        self.optimize_btn.setText("優化中…" if busy else "✨ 優化")
+        if not busy:
+            self.text_input.clear()
 
     # ---- history panel ---------------------------------------------------
     def _tab_changed(self, index: int) -> None:
@@ -248,6 +320,10 @@ class MainWindow(QMainWindow):
 
     def _mode_changed(self) -> None:
         self.settings.mode = self.mode_combo.currentData()
+        self.settings.save()
+
+    def _think_changed(self) -> None:
+        self.settings.think_level = self.think_combo.currentData()
         self.settings.save()
 
     def _model_changed(self, name: str) -> None:

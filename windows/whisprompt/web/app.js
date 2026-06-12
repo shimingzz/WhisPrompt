@@ -2,12 +2,29 @@
 
 const $ = (id) => document.getElementById(id);
 const statusEl = $("status"), recBtn = $("recBtn"), timerEl = $("timer");
+const pauseBtn = $("pauseBtn"), doneBtn = $("doneBtn"), recControls = $("recControls");
 
 let mediaRecorder = null;
 let chunks = [];
 let mode = "prompt";
+let think = "low";
 let timerInterval = null;
-let startTime = 0;
+// Pause-aware elapsed time: accumulated past segments + current segment start.
+let elapsedBefore = 0;
+let segStart = 0;
+
+// ---- theme ----
+function applyTheme(theme) {
+  document.documentElement.dataset.theme = theme;
+  $("themeToggle").textContent = theme === "dark" ? "☀️" : "🌙";
+  localStorage.setItem("theme", theme);
+  const meta = document.querySelector('meta[name="theme-color"]');
+  if (meta) meta.content = theme === "dark" ? "#262624" : "#FAF9F5";
+}
+applyTheme(localStorage.getItem("theme") ||
+  (matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light"));
+$("themeToggle").onclick = () =>
+  applyTheme(document.documentElement.dataset.theme === "dark" ? "light" : "dark");
 
 // iOS Safari records audio/mp4; Chrome/Android typically audio/webm.
 function pickMime() {
@@ -24,7 +41,9 @@ async function init() {
     statusEl.textContent = `${s.whisper_model} (${s.whisper_device}) · ${s.ollama_model || "無 LLM"}`;
     statusEl.classList.add("ok");
     mode = s.mode || "prompt";
-    renderModes(s.modes || {});
+    think = s.think_level || "low";
+    renderOptions($("modeRow"), s.modes || {}, mode, (k) => { mode = k; });
+    renderOptions($("thinkRow"), s.think_levels || {}, think, (k) => { think = k; });
     recBtn.disabled = false;
   } catch {
     statusEl.textContent = "無法連線到伺服器";
@@ -33,15 +52,14 @@ async function init() {
   }
 }
 
-function renderModes(modes) {
-  const row = $("modeRow");
+function renderOptions(row, options, current, onPick) {
   row.innerHTML = "";
-  for (const [key, label] of Object.entries(modes)) {
+  for (const [key, label] of Object.entries(options)) {
     const b = document.createElement("button");
-    b.className = "mode-btn" + (key === mode ? " active" : "");
+    b.className = "mode-btn" + (key === current ? " active" : "");
     b.textContent = label;
     b.onclick = () => {
-      mode = key;
+      onPick(key);
       row.querySelectorAll(".mode-btn").forEach((x) => x.classList.remove("active"));
       b.classList.add("active");
     };
@@ -54,6 +72,12 @@ function fmtTime(ms) {
   return `${String(Math.floor(s / 60)).padStart(2, "0")}:${String(s % 60).padStart(2, "0")}`;
 }
 
+function currentElapsed() {
+  const paused = mediaRecorder && mediaRecorder.state === "paused";
+  return elapsedBefore + (paused ? 0 : Date.now() - segStart);
+}
+
+// ---- recording with pause/resume ----
 async function startRecording() {
   let stream;
   try {
@@ -71,19 +95,40 @@ async function startRecording() {
     upload(new Blob(chunks, { type: mediaRecorder.mimeType }));
   };
   mediaRecorder.start();
-  startTime = Date.now();
+  elapsedBefore = 0;
+  segStart = Date.now();
   recBtn.classList.add("recording");
+  recControls.classList.remove("hidden");
+  pauseBtn.textContent = "⏸ 暫停";
   timerEl.textContent = "00:00";
-  timerInterval = setInterval(() => { timerEl.textContent = fmtTime(Date.now() - startTime); }, 250);
+  timerInterval = setInterval(() => { timerEl.textContent = fmtTime(currentElapsed()); }, 250);
 }
 
-function stopRecording() {
+function togglePause() {
+  if (!mediaRecorder) return;
+  if (mediaRecorder.state === "recording") {
+    mediaRecorder.pause();
+    elapsedBefore += Date.now() - segStart;
+    recBtn.classList.add("paused");
+    pauseBtn.textContent = "▶ 繼續";
+    timerEl.textContent = `${fmtTime(elapsedBefore)} · 已暫停`;
+  } else if (mediaRecorder.state === "paused") {
+    mediaRecorder.resume();
+    segStart = Date.now();
+    recBtn.classList.remove("paused");
+    pauseBtn.textContent = "⏸ 暫停";
+  }
+}
+
+function finishRecording() {
+  if (!mediaRecorder || mediaRecorder.state === "inactive") return;
   clearInterval(timerInterval);
-  recBtn.classList.remove("recording");
+  recBtn.classList.remove("recording", "paused");
+  recControls.classList.add("hidden");
   recBtn.classList.add("busy");
   recBtn.disabled = true;
   timerEl.textContent = "轉錄與優化中...";
-  mediaRecorder.stop();
+  mediaRecorder.stop();  // onstop fires upload()
 }
 
 async function upload(blob) {
@@ -91,6 +136,7 @@ async function upload(blob) {
   const form = new FormData();
   form.append("file", blob, `recording.${ext}`);
   form.append("mode", mode);
+  form.append("think", think);
   try {
     const r = await fetch("/api/audio", { method: "POST", body: form });
     const data = await r.json();
@@ -103,14 +149,50 @@ async function upload(blob) {
   } finally {
     recBtn.classList.remove("busy");
     recBtn.disabled = false;
+    mediaRecorder = null;
   }
 }
+
+recBtn.onclick = () => {
+  if (!mediaRecorder || mediaRecorder.state === "inactive") startRecording();
+  else togglePause();  // tapping the big button while recording = pause/resume
+};
+pauseBtn.onclick = togglePause;
+doneBtn.onclick = finishRecording;
+
+// ---- direct text input ----
+$("textSubmit").onclick = async () => {
+  const text = $("textInput").value.trim();
+  if (!text) return;
+  const btn = $("textSubmit");
+  btn.disabled = true;
+  btn.textContent = "優化中…";
+  try {
+    const r = await fetch("/api/text", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text, mode, think }),
+    });
+    const data = await r.json();
+    if (!r.ok) throw new Error(data.error || r.statusText);
+    showResult(data);
+    loadHistory();
+    $("textInput").value = "";
+  } catch (e) {
+    timerEl.textContent = `失敗: ${e.message}`;
+  } finally {
+    btn.disabled = false;
+    btn.textContent = "✨ 優化";
+  }
+};
 
 function showResult(data) {
   $("resultArea").classList.remove("hidden");
   $("promptText").textContent = data.prompt;
-  $("transcriptText").textContent = data.transcript || "(無語音內容)";
-  $("meta").textContent = `· ${data.duration}s · ${data.language}`;
+  $("transcriptText").textContent = data.transcript || "(無內容)";
+  $("meta").textContent = data.language === "text"
+    ? "· 文字輸入"
+    : `· ${data.duration}s · ${data.language}`;
 }
 
 // ---- history (notebook) ----
@@ -190,11 +272,6 @@ $("archiveToggle").onclick = () => {
   showArchived = !showArchived;
   $("archiveToggle").classList.toggle("active", showArchived);
   loadHistory();
-};
-
-recBtn.onclick = () => {
-  if (mediaRecorder && mediaRecorder.state === "recording") stopRecording();
-  else startRecording();
 };
 
 document.querySelectorAll(".copy-btn").forEach((btn) => {

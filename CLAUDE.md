@@ -33,10 +33,15 @@ Two clients, one Python backend (`windows/whisprompt/`):
   the IP changes). The CA must be installed/trusted on the iPhone once.
 - `transcriber.py` wraps faster-whisper; tries CUDA float16, falls back to CPU int8. On Windows
   the cuBLAS/cuDNN DLLs come from the pip `nvidia-*` packages via `os.add_dll_directory`.
-- `llm.py` calls the Ollama HTTP API. Mode strings: `prompt` (rewrite as clean prompt),
-  `clean` (fix typos only), `raw` (skip LLM). System prompts live in `config.py`.
+- `llm.py` calls the Ollama HTTP API. Mode strings: `prompt` (prompt-engineer rewrite with a
+  few-shot example), `clean` (fix typos only), `raw` (skip LLM). Think levels (`off/low/medium/
+  high`) map to Ollama's `think` param — gemma4 accepts the named levels; `off` → `think:false`.
+  System prompts live in `config.py`; `Settings.custom_prompt_system` empty means "use built-in
+  default" (never persist the default text itself, or updates won't reach existing installs).
 - `gui/main_window.py` (PySide6): worker threads communicate with Qt ONLY via signals
   (`result_ready`/`status_changed`/`models_loaded`); `Pipeline.on_result` is wired to a signal emit.
+  `gui/theme.py` holds the Claude-style light/dark QSS (warm ivory / charcoal, #D97757 accent);
+  the PWA mirrors the same palette via CSS variables in `web/style.css`.
 - `web/` is the PWA served by StaticFiles at `/` — plain JS, no build step.
 - `ios/WhisPrompt/` is a SwiftUI Xcode project (objectVersion 77, filesystem-synchronized
   groups — new source files are picked up automatically, no pbxproj edits needed). It talks to

@@ -1,0 +1,11 @@
+fastapi
+uvicorn[standard]
+faster-whisper
+httpx
+PySide6
+qrcode[pil]
+cryptography
+python-multipart
+zeroconf
+nvidia-cublas-cu12
+nvidia-cudnn-cu12
